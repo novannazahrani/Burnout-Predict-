@@ -1,16 +1,16 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useLocation } from 'react-router-dom'
 import { DashboardLayout } from '../components/layout/DashboardLayout'
-import { getHistoryList, getJournalsByDate, type DailyHistory } from '../services/historyService'
+import { type DailyHistory } from '../services/historyService'
+import { getCheckIns, getJournals, normalizeEmotion } from '../services/trackingService'
+import type { Journal } from '../types/tracking'
 
 const MOOD_CONFIG: Record<string, { bg: string; text: string; label: string; icon: string }> = {
-  Tenang: { bg: 'bg-secondary-container', text: 'text-on-secondary-fixed-variant', label: 'Tenang', icon: 'spa' },
-  Bahagia: { bg: 'bg-tertiary-fixed', text: 'text-tertiary', label: 'Bahagia', icon: 'sentiment_very_satisfied' },
-  Senang: { bg: 'bg-tertiary-fixed', text: 'text-tertiary', label: 'Bahagia', icon: 'sentiment_very_satisfied' }, // Synonym
-  Cemas: { bg: 'bg-error-container', text: 'text-on-error-container', label: 'Cemas', icon: 'sentiment_dissatisfied' },
-  Lelah: { bg: 'bg-surface-container-high', text: 'text-on-primary-container', label: 'Lelah', icon: 'battery_alert' },
-  Stres: { bg: 'bg-error text-white', text: 'text-on-error', label: 'Stres', icon: 'warning' },
-  Sedih: { bg: 'bg-surface-dim', text: 'text-on-surface', label: 'Sedih', icon: 'sentiment_very_dissatisfied' },
+  anger: { bg: 'mood-anger', text: 'text-[#8b0000]', label: 'anger', icon: 'sentiment_very_dissatisfied' },
+  happy: { bg: 'mood-happy', text: 'text-[#5f4100]', label: 'happy', icon: 'sentiment_very_satisfied' },
+  sadness: { bg: 'mood-sadness', text: 'text-[#1e3a8a]', label: 'sadness', icon: 'sentiment_dissatisfied' },
+  love: { bg: 'mood-love', text: 'text-[#831843]', label: 'love', icon: 'favorite' },
+  fear: { bg: 'mood-fear', text: 'text-[#581c87]', label: 'fear', icon: 'warning' },
 }
 
 const RISK_BADGES: Record<'Rendah' | 'Sedang' | 'Tinggi', { badge: string; text: string }> = {
@@ -73,14 +73,20 @@ function MoodCalendar({
       const dateStr = `${selectedMonth}-${dStr}`
       const historyItem = historyList.find((h) => h.date === dateStr)
 
-      let cellClass = 'bg-surface-container-lowest text-on-surface-variant hover:bg-primary/5 hover:text-primary border border-outline-variant/10'
+      let cellClass = 'text-on-surface-variant'
       let moodEmotion = ''
 
       if (historyItem) {
-        moodEmotion = historyItem.emotion
-        const config = MOOD_CONFIG[moodEmotion]
-        if (config) {
-          cellClass = config.bg
+        const normalized = normalizeEmotion(historyItem.emotion)
+        if (['anger', 'happy', 'sadness', 'love', 'fear'].includes(normalized)) {
+          moodEmotion = normalized
+          const config = MOOD_CONFIG[normalized]
+          if (config) {
+            cellClass = config.bg
+          }
+        } else {
+          cellClass = 'bg-surface-container-low text-on-surface-variant'
+          moodEmotion = 'neutral'
         }
       }
 
@@ -121,18 +127,24 @@ function MoodCalendar({
           }
 
           const isSelected = selectedDate === cell.dateStr
-          const selectedRing = isSelected ? 'ring-2 ring-primary ring-offset-2 scale-105 z-10 shadow-md' : ''
+          const selectedRing = isSelected
+            ? 'border-2 border-primary scale-105 z-10 shadow-md'
+            : 'border border-outline-variant/10'
 
           return (
             <button
               key={cell.dateStr}
               onClick={() => onSelectDate(cell.dateStr)}
-              className={`aspect-square rounded-xl flex flex-col items-center justify-center text-sm font-semibold transition-all duration-200 ${cell.className} ${selectedRing}`}
+              className={`aspect-square rounded-full flex flex-col items-center justify-center text-sm font-semibold transition-all duration-200 shadow-sm cursor-pointer ${
+                cell.hasData
+                  ? cell.className
+                  : 'bg-white text-on-surface hover:bg-primary/5 hover:text-primary hover:border-primary/30'
+              } ${selectedRing}`}
               type="button"
             >
-              <span>{cell.day}</span>
+              <span className={cell.hasData ? '-translate-y-0.5' : ''}>{cell.day}</span>
               {cell.hasData && (
-                <span className="w-1.5 h-1.5 rounded-full bg-primary/80 mt-1" />
+                <span className="w-1.5 h-1.5 rounded-full bg-primary mt-0.5" />
               )}
             </button>
           )
@@ -146,12 +158,11 @@ function MoodCalendar({
 
 function MoodLegend() {
   const legends = [
-    { label: 'Tenang', dotClass: 'bg-secondary-container border-secondary-container' },
-    { label: 'Bahagia', dotClass: 'bg-tertiary-fixed border-tertiary-fixed' },
-    { label: 'Cemas', dotClass: 'bg-error-container border-error-container' },
-    { label: 'Lelah', dotClass: 'bg-surface-container-high border-surface-container-high' },
-    { label: 'Stres', dotClass: 'bg-error border-error' },
-    { label: 'Sedih', dotClass: 'bg-surface-dim border-surface-dim' },
+    { label: 'anger', dotClass: 'mood-anger border-transparent' },
+    { label: 'happy', dotClass: 'mood-happy border-transparent' },
+    { label: 'sadness', dotClass: 'mood-sadness border-transparent' },
+    { label: 'love', dotClass: 'mood-love border-transparent' },
+    { label: 'fear', dotClass: 'mood-fear border-transparent' },
   ]
 
   return (
@@ -177,10 +188,11 @@ function MoodSummary({ monthlyData }: { monthlyData: DailyHistory[] }) {
     let stressDays = 0
 
     monthlyData.forEach((item) => {
-      if (item.emotion) {
-        emotionCounts[item.emotion] = (emotionCounts[item.emotion] || 0) + 1
+      const norm = normalizeEmotion(item.emotion)
+      if (['anger', 'happy', 'sadness', 'love', 'fear'].includes(norm)) {
+        emotionCounts[norm] = (emotionCounts[norm] || 0) + 1
       }
-      if (item.emotion === 'Stres' || item.riskLevel === 'Tinggi') {
+      if (norm === 'anger' || item.riskLevel === 'Tinggi') {
         stressDays++
       }
     })
@@ -226,14 +238,17 @@ function MoodSummary({ monthlyData }: { monthlyData: DailyHistory[] }) {
 
 function MoodStats({ monthlyData }: { monthlyData: DailyHistory[] }) {
   const rows = useMemo(() => {
-    const baseMoods = ['Tenang', 'Bahagia', 'Lelah', 'Stres', 'Cemas', 'Sedih']
+    const baseMoods = ['anger', 'happy', 'sadness', 'love', 'fear']
     if (monthlyData.length === 0) {
       return baseMoods.map((name) => ({ name, percentage: 0, barClass: MOOD_CONFIG[name]?.bg.split(' ')[0] || 'bg-surface-container' }))
     }
 
     const counts: Record<string, number> = {}
     monthlyData.forEach((item) => {
-      if (item.emotion) counts[item.emotion] = (counts[item.emotion] || 0) + 1
+      const norm = normalizeEmotion(item.emotion)
+      if (baseMoods.includes(norm)) {
+        counts[norm] = (counts[norm] || 0) + 1
+      }
     })
 
     return baseMoods.map((name) => {
@@ -274,8 +289,14 @@ function MoodInsightCard({ monthlyData }: { monthlyData: DailyHistory[] }) {
       return 'Belum ada data mood untuk memberikan insight. Silakan isi check-in harian atau tulis jurnal Anda hari ini.'
     }
 
-    const stressCount = monthlyData.filter(m => m.emotion === 'Stres' || m.riskLevel === 'Tinggi').length
-    const calmCount = monthlyData.filter(m => m.emotion === 'Tenang' || m.emotion === 'Bahagia').length
+    const stressCount = monthlyData.filter(m => {
+      const norm = normalizeEmotion(m.emotion)
+      return norm === 'anger' || m.riskLevel === 'Tinggi'
+    }).length
+    const calmCount = monthlyData.filter(m => {
+      const norm = normalizeEmotion(m.emotion)
+      return norm === 'happy' || norm === 'love'
+    }).length
 
     if (stressCount > calmCount) {
       return 'Anda menunjukkan peningkatan tingkat stres dan lelah yang cukup tinggi bulan ini. Disarankan untuk memprioritaskan istirahat yang cukup dan mengambil jeda rileksasi berkala di sela pekerjaan.'
@@ -311,15 +332,13 @@ function MoodInsightCard({ monthlyData }: { monthlyData: DailyHistory[] }) {
 function SelectedDateDetail({
   selectedDate,
   historyItem,
+  journals,
 }: {
   selectedDate: string
   historyItem: DailyHistory | null
+  journals: Journal[]
 }) {
   const formattedDate = formatIndonesianDate(selectedDate)
-
-  const journals = useMemo(() => {
-    return getJournalsByDate(selectedDate)
-  }, [selectedDate])
 
   const hasData = historyItem !== null || journals.length > 0
 
@@ -370,13 +389,14 @@ function SelectedDateDetail({
               <div className="space-y-3 max-h-[240px] overflow-y-auto pr-1">
                 {journals.map((journal) => {
                   const EMOTION_BADGE_STYLE: Record<string, string> = {
-                    Lelah: 'bg-surface-container-high text-on-primary-container border-outline-variant/30',
-                    Cemas: 'bg-error-container text-on-error-container border-error-container/30',
-                    Marah: 'bg-rose-100 text-rose-800 border-rose-200/50',
-                    Senang: 'bg-tertiary-fixed text-tertiary border-tertiary-fixed/30',
-                    Netral: 'bg-secondary-container text-on-secondary-fixed-variant border-secondary-container/30',
+                    anger: 'mood-anger border-transparent',
+                    happy: 'mood-happy border-transparent',
+                    sadness: 'mood-sadness border-transparent',
+                    love: 'mood-love border-transparent',
+                    fear: 'mood-fear border-transparent',
+                    neutral: 'bg-secondary-container text-on-secondary-fixed-variant border-secondary-container/30',
                   }
-                  const badgeClass = EMOTION_BADGE_STYLE[journal.detectedEmotion] || 'bg-surface-container text-outline border-outline-variant/30'
+                  const badgeClass = (journal.detectedEmotion ? EMOTION_BADGE_STYLE[journal.detectedEmotion] : null) || 'bg-surface-container text-outline border-outline-variant/30'
                   return (
                     <div key={journal.id} className="bg-surface-container-low/40 rounded-xl p-4 border border-outline-variant/10 flex flex-col gap-2">
                       <p className="font-body-md text-[14px] text-on-surface leading-relaxed italic">
@@ -387,7 +407,7 @@ function SelectedDateDetail({
                           {journal.detectedEmotion}
                         </span>
                         <span className="text-[10px] text-on-surface-variant font-medium">
-                          {new Date(journal.createdAt).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' })} WIB
+                          {new Date(journal.createdAt || journal.date).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' })} WIB
                         </span>
                       </div>
                       {journal.insight && (
@@ -410,8 +430,9 @@ function SelectedDateDetail({
             </h5>
             <div className="flex items-center gap-3">
               {(() => {
-                const activeEmotion = historyItem?.emotion || (journals.length > 0 ? journals[0].detectedEmotion : null) || 'Netral'
-                const config = MOOD_CONFIG[activeEmotion] || { bg: 'bg-surface-container', text: 'text-on-surface-variant', label: activeEmotion, icon: 'sentiment_neutral' }
+                const rawEmotion = historyItem?.emotion || (journals.length > 0 ? journals[0].detectedEmotion : null) || 'neutral'
+                const activeEmotion = normalizeEmotion(rawEmotion)
+                const config = MOOD_CONFIG[activeEmotion] || { bg: 'bg-surface-container-low text-on-surface-variant', text: 'text-on-surface-variant', label: activeEmotion, icon: 'sentiment_neutral' }
                 return (
                   <div className={`inline-flex items-center gap-2 px-4 py-2 rounded-xl border border-outline-variant/20 ${config.bg} font-bold text-[14px]`}>
                     <span className="material-symbols-outlined text-[18px]">{config.icon}</span>
@@ -502,18 +523,18 @@ function HistoryList({
         <div className="flex-1 flex flex-col gap-3">
           {paginatedData.map((item) => {
             const isSelected = selectedDate === item.date
-            const mood = MOOD_CONFIG[item.emotion] || { bg: 'bg-surface-container', text: 'text-on-surface', label: item.emotion, icon: 'sentiment_neutral' }
+            const normalizedEmotion = normalizeEmotion(item.emotion)
+            const mood = MOOD_CONFIG[normalizedEmotion] || { bg: 'bg-surface-container-low', text: 'text-on-surface-variant', label: normalizedEmotion, icon: 'sentiment_neutral' }
             const risk = RISK_BADGES[item.riskLevel as 'Rendah' | 'Sedang' | 'Tinggi'] || { badge: 'bg-surface-container', text: item.riskLevel }
 
             return (
               <button
                 key={item.date}
                 onClick={() => onSelectDate(item.date)}
-                className={`w-full text-left p-4 rounded-xl border transition-all duration-200 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3 cursor-pointer ${
-                  isSelected
-                    ? 'border-primary bg-primary/5 shadow-sm ring-1 ring-primary'
-                    : 'border-outline-variant/20 bg-surface-container-low/30 hover:border-outline-variant/60 hover:bg-surface-container-low/60'
-                }`}
+                className={`w-full text-left p-4 rounded-xl border transition-all duration-200 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3 cursor-pointer ${isSelected
+                  ? 'border-primary bg-primary/5 shadow-sm ring-1 ring-primary'
+                  : 'border-outline-variant/20 bg-surface-container-low/30 hover:border-outline-variant/60 hover:bg-surface-container-low/60'
+                  }`}
                 type="button"
               >
                 <div className="flex items-center gap-3">
@@ -521,8 +542,11 @@ function HistoryList({
                     <span className="material-symbols-outlined text-[20px]">{mood.icon}</span>
                   </div>
                   <div>
-                    <span className="font-bold text-[14px] text-on-surface block">
+                    <span className="font-bold text-[14px] text-on-surface flex items-center gap-2">
                       {formatIndonesianDate(item.date)}
+                      <span className={`px-2 py-0.5 rounded-full text-[10px] font-semibold border ${mood.bg} border-outline-variant/10`}>
+                        {mood.label}
+                      </span>
                     </span>
                     <span className="text-[12px] text-on-surface-variant line-clamp-1 mt-0.5 max-w-[200px] sm:max-w-[320px] italic">
                       {item.journal ? `"${item.journal}"` : 'Tidak ada catatan jurnal'}
@@ -563,11 +587,10 @@ function HistoryList({
                   <button
                     key={p}
                     onClick={() => onPageChange(p)}
-                    className={`w-8 h-8 rounded-full text-[13px] font-bold transition-all ${
-                      isActive
-                        ? 'bg-primary text-on-primary shadow-md shadow-primary/20'
-                        : 'border border-outline-variant/30 hover:bg-surface-container-low text-on-surface-variant'
-                    }`}
+                    className={`w-8 h-8 rounded-full text-[13px] font-bold transition-all ${isActive
+                      ? 'bg-primary text-on-primary shadow-md shadow-primary/20'
+                      : 'border border-outline-variant/30 hover:bg-surface-container-low text-on-surface-variant'
+                      }`}
                     type="button"
                   >
                     {p}
@@ -595,15 +618,66 @@ export function MoodMapPage() {
   const location = useLocation()
   const isHistorySection = location.search.includes('section=history')
 
-  const [selectedMonth, setSelectedMonth] = useState('2026-05')
-  const [selectedDate, setSelectedDate] = useState('2026-05-29')
-  const [historyList, setHistoryList] = useState<DailyHistory[]>([])
-  const [currentPage, setCurrentPage] = useState(1)
+  const today = new Date()
+  const yyyy = today.getFullYear()
+  const mm = String(today.getMonth() + 1).padStart(2, '0')
+  const dd = String(today.getDate()).padStart(2, '0')
+  const todayStr = `${yyyy}-${mm}-${dd}`
+  const currentMonthStr = `${yyyy}-${mm}`
 
-  // Load history list from localStorage on mount
+  const [selectedMonth, setSelectedMonth] = useState(currentMonthStr)
+  const [selectedDate, setSelectedDate] = useState(todayStr)
+  const [historyList, setHistoryList] = useState<DailyHistory[]>([])
+  const [journalsList, setJournalsList] = useState<Journal[]>([])
+  const [currentPage, setCurrentPage] = useState(1)
+  const [isLoading, setIsLoading] = useState(true)
+
+  // Load history and journal list from backend on mount
   useEffect(() => {
-    const list = getHistoryList()
-    setHistoryList(list)
+    async function loadData() {
+      try {
+        setIsLoading(true)
+        const [checkins, journals] = await Promise.all([
+          getCheckIns(),
+          getJournals()
+        ])
+
+        setJournalsList(journals)
+
+        // Merge checkins and journals by date into DailyHistory items
+        const dates = Array.from(new Set([
+          ...checkins.map((c) => c.date),
+          ...journals.map((j) => j.date)
+        ])).sort((a, b) => b.localeCompare(a))
+
+        const merged: DailyHistory[] = dates.map((date) => {
+          const c = checkins.find((x) => x.date === date)
+          const js = journals.filter((x) => x.date === date)
+
+          const journalText = js.map((j) => j.content).join('\n')
+          const rawEmotion = js.length > 0
+            ? (js[0].detectedEmotion || 'neutral')
+            : (c ? (c.riskLevel === 'Tinggi' ? 'anger' : c.riskLevel === 'Sedang' ? 'sadness' : 'neutral') : 'neutral')
+          const emotion = normalizeEmotion(rawEmotion)
+
+          return {
+            date,
+            journal: journalText,
+            emotion,
+            burnoutScore: c ? (c.score_assessment ?? c.burnoutScore ?? 0) : 0,
+            riskLevel: c ? (c.riskLevel as 'Rendah' | 'Sedang' | 'Tinggi') : 'Rendah',
+          }
+        })
+
+        setHistoryList(merged)
+      } catch (err) {
+        console.error('Failed to load mood map history:', err)
+      } finally {
+        setIsLoading(false)
+      }
+    }
+
+    void loadData()
   }, [])
 
   // Filter history items by selected month
@@ -615,6 +689,11 @@ export function MoodMapPage() {
   const selectedHistoryItem = useMemo(() => {
     return historyList.find((item) => item.date === selectedDate) || null
   }, [historyList, selectedDate])
+
+  // Get journals for the selected date
+  const selectedDateJournals = useMemo(() => {
+    return journalsList.filter(j => j.date === selectedDate)
+  }, [journalsList, selectedDate])
 
   // Scroll to History section if routed via '/mood-map?section=history'
   useEffect(() => {
@@ -646,6 +725,38 @@ export function MoodMapPage() {
     }
   }
 
+  const monthOptions = useMemo(() => {
+    const options = []
+    const months = [
+      'Januari', 'Februari', 'Maret', 'April', 'Mei', 'Juni',
+      'Juli', 'Agustus', 'September', 'Oktober', 'November', 'Desember'
+    ]
+    const d = new Date()
+    d.setDate(1) // Avoid day-overflow duplicate month bug when current date is the 31st
+    for (let i = 0; i < 6; i++) {
+      const year = d.getFullYear()
+      const monthNum = d.getMonth() + 1
+      const val = `${year}-${String(monthNum).padStart(2, '0')}`
+      const label = `${months[d.getMonth()]} ${year}`
+      options.push({ val, label })
+      d.setMonth(d.getMonth() - 1)
+    }
+    return options
+  }, [])
+
+  if (isLoading) {
+    return (
+      <DashboardLayout
+        currentPath={isHistorySection ? '/mood-map?section=history' : '/mood-map'}
+        topbarTitle="Pemetaan Mood & Riwayat"
+      >
+        <div className="min-h-[50vh] grid place-items-center">
+          <div className="w-12 h-12 rounded-full border-4 border-surface-container-high border-t-primary animate-spin" />
+        </div>
+      </DashboardLayout>
+    )
+  }
+
   return (
     <DashboardLayout
       currentPath={isHistorySection ? '/mood-map?section=history' : '/mood-map'}
@@ -667,9 +778,11 @@ export function MoodMapPage() {
             onChange={handleMonthChange}
             className="appearance-none bg-surface-container-lowest border border-outline-variant text-on-surface font-label-md text-label-md py-2.5 pl-4 pr-10 rounded-xl focus:ring-2 focus:ring-primary focus:border-primary focus:outline-none shadow-sm cursor-pointer hover:bg-surface-container-low transition-colors"
           >
-            <option value="2026-05">Mei 2026</option>
-            <option value="2026-04">April 2026</option>
-            <option value="2026-03">Maret 2026</option>
+            {monthOptions.map((opt) => (
+              <option key={opt.val} value={opt.val}>
+                {opt.label}
+              </option>
+            ))}
           </select>
           <span className="material-symbols-outlined absolute right-3 top-1/2 -translate-y-1/2 text-on-surface-variant pointer-events-none text-[20px]">
             expand_more
@@ -710,6 +823,7 @@ export function MoodMapPage() {
             <SelectedDateDetail
               selectedDate={selectedDate}
               historyItem={selectedHistoryItem}
+              journals={selectedDateJournals}
             />
           </div>
 
